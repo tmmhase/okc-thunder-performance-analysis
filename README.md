@@ -47,4 +47,10 @@ These findings highlight subtle performance differences caused by rest days and 
 ---
 
 ## 📁 Repository Structure
-
+okc-thunder-performance-analysis/
+│
+├── okc_thunder_analysis_project.Rmd # Full RMarkdown analysis
+├── okc_thunder_analysis_project.html # Rendered report (for viewing)
+├── schedule.csv # Schedule data (if applicable)
+├── game_data.csv # Game-level data (if applicable)
+└── README.md # Project documentation
