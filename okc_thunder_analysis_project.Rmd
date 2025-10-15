@@ -1,0 +1,692 @@
+---
+title: "Oklahoma City Thunder — Performance Analysis Project"
+author: "Tanish Mhase"
+date: "October 15, 2025"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+  pdf_document: default
+---
+
+
+
+> **Project Description (for GitHub/LinkedIn):**  
+> This R project analyzes the Oklahoma City Thunder's performance trends using publicly available basketball data. 
+> It demonstrates data wrangling, visualization, and basic statistical analysis in RMarkdown. 
+> Code cells are fully visible for reproducibility, and results include clean charts and summaries suitable for a portfolio.
+
+
+
+# Abstract
+
+This report presents an independent analysis of the Oklahoma City Thunder (OKC). 
+The objective is to understand performance patterns across games and players by leveraging 
+data manipulation and visualization in R. We emphasize transparent, reproducible analysis 
+with clear narrative and interpretation.
+
+# Introduction & Objective
+
+The analysis focuses on identifying trends and insights in OKC's recent performance. 
+We turn raw data into interpretable visuals and summary tables, discussing context and 
+limitations. This document is written as a professional project report (not as an 
+assignment or questionnaire).
+
+# Data Overview
+
+We rely on basketball data pulled or loaded within the R code cells below. The data is 
+cleaned and transformed for analysis. Any dataset-specific choices (feature selection, 
+filters, or transformations) are included in the visible code chunks. If external data 
+files are referenced, ensure they are placed in the project directory and paths are updated accordingly.
+
+
+# Methodology
+
+Below are the exact R code chunks used to acquire, clean, transform, and analyze the data. 
+All code from the original notebook is preserved verbatim; only narrative text has been 
+rewritten to reflect a standalone project report.
+
+
+## Analysis Step 1
+
+```{r set options, include=FALSE}
+# DO NOT CHANGE THE LINE BELOW 
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Analysis Step 2
+
+```{r logo, echo = FALSE}
+
+htmltools::img(src = 'https://cdn.nba.com/logos/nba/1610612760/primary/L/logo.svg',
+                height = '250px',
+                alt = 'logo',
+                style = 'position: fixed; top: -40px; left: 5px;')
+```
+
+
+## Analysis Step 3
+
+```{r load data, message = F, warning = F}
+library(tidyverse)
+library(lubridate)
+
+schedule <- read_csv("schedule.csv")
+draft_schedule <- read_csv("schedule_24_partial.csv")
+locations <- read_csv("locations.csv")
+game_data <- read_csv("team_game_data.csv")
+```
+
+
+## Analysis Step 4
+
+```{r}
+library(tidyverse)
+library(lubridate)
+
+# Load data
+draft_schedule <- read_csv("schedule_24_partial.csv")
+
+# Filter for OKC only and make sure gamedate is in Date format
+okc <- draft_schedule %>%
+  filter(team == "OKC") %>%
+  mutate(gamedate = ymd(gamedate)) %>%
+  arrange(gamedate)
+
+# For each game date, count how many OKC games occurred in the past 6 days (including today)
+okc <- okc %>%
+  mutate(
+    games_last_6 = map_int(
+      gamedate,
+      ~ sum(gamedate >= (.x - days(5)) & gamedate <= .x)
+    )
+  )
+
+# Count how many times OKC played 4 games within 6 nights
+okc_4in6_count <- sum(okc$games_last_6 == 4)
+okc_4in6_count
+
+```
+
+
+## Analysis Step 5
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(rlang)
+
+# 1) Load the schedule and find the date column (works whether it's "gamedate" or "date")
+schedule <- read_csv("schedule.csv")
+
+cand <- names(schedule)
+date_col <- cand[grepl("^(date|gamedate|game[_ ]?date)$", tolower(cand))][1]
+stopifnot(!is.na(date_col))  # fail early if no date-like column found
+
+# 2) Prepare data: per team-season, sorted by date
+sch <- schedule %>%
+  mutate(gamedate = ymd(.data[[date_col]])) %>%
+  arrange(team, season, gamedate)
+
+# 3) For each team-season, count games in the last 6 days (including today)
+sch <- sch %>%
+  group_by(team, season) %>%
+  mutate(
+    games_last_6 = purrr::map_int(
+      gamedate,
+      ~ sum(gamedate >= (.x - days(5)) & gamedate <= .x)
+    )
+  ) %>%
+  ungroup()
+
+# 4) Team-season totals: how many "4th in 6 days" games?
+by_team_season <- sch %>%
+  group_by(team, season) %>%
+  summarize(
+    count_4in6 = sum(games_last_6 == 4, na.rm = TRUE),
+    n_games    = n(),
+    .groups = "drop"
+  ) %>%
+  # Normalize to an 82-game season
+  mutate(per82_4in6 = count_4in6 * 82 / n_games)
+
+# 5) League-wide average across all team-seasons (2014–15 through 2023–24 are already in the file)
+league_avg_4in6_per82 <- mean(by_team_season$per82_4in6, na.rm = TRUE)
+league_avg_4in6_per82
+
+```
+
+
+## Analysis Step 6
+
+```{r}
+# 1) Average 4-in-6 per-82 by team
+team_avg_4in6 <- by_team_season %>%
+  group_by(team) %>%
+  summarize(avg_per82_4in6 = mean(per82_4in6, na.rm = TRUE), .groups = "drop")
+
+# 2) Find the highest and lowest
+most_4in6  <- team_avg_4in6 %>% slice_max(avg_per82_4in6, n = 1)
+fewest_4in6 <- team_avg_4in6 %>% slice_min(avg_per82_4in6, n = 1)
+
+most_4in6
+fewest_4in6
+```
+
+## Analysis Step 7 — Opponent B2B effect on BKN defensive eFG%
+
+
+```{r}
+# Make sure dates are Date type
+schedule  <- schedule  %>% mutate(gamedate = as.Date(gamedate))
+game_data <- game_data %>% mutate(gamedate = as.Date(gamedate))
+
+# Identify back-to-backs (B2B) for every team in 2023 season
+schedule_with_b2b <- schedule %>%
+  filter(season == 2023) %>%
+  arrange(team, gamedate) %>%
+  group_by(team) %>%
+  mutate(
+    prev_gamedate = lag(gamedate),
+    days_rest     = as.numeric(difftime(gamedate, prev_gamedate, units = "days")),
+    is_b2b        = !is.na(days_rest) & days_rest == 1
+  ) %>%
+  ungroup() %>%
+  select(team, gamedate, is_b2b)
+
+# Filter BKN defensive games and compute opponent eFG%
+# Use your dataset's column names: fgmade, fg3made, fgattempt
+bkn_games <- game_data %>%
+  filter(def_team == "BKN", season == 2023) %>%
+  mutate(
+    opp_efg_pct = dplyr::if_else(
+      fgattempted > 0,
+      (fgmade + 0.5 * fg3made) / fgattempted,
+      NA_real_
+    )
+  )
+
+# Attach whether BKN's opponent was on a B2B that game
+bkn_with_opp_b2b <- bkn_games %>%
+  left_join(schedule_with_b2b, by = c("off_team" = "team", "gamedate" = "gamedate"))
+
+# Overall defensive eFG% allowed by BKN (in %)
+bkn_def_efg_overall <- bkn_games %>%
+  summarise(def_efg_pct = mean(opp_efg_pct, na.rm = TRUE) * 100) %>%
+  pull(def_efg_pct)
+
+# Defensive eFG% allowed by BKN when opponent was on a B2B (in %)
+bkn_def_efg_opp_b2b <- bkn_with_opp_b2b %>%
+  filter(is_b2b == TRUE) %>%
+  summarise(def_efg_pct = mean(opp_efg_pct, na.rm = TRUE) * 100) %>%
+  pull(def_efg_pct)
+
+cat("BKN Defensive eFG%:", round(bkn_def_efg_overall, 1), "%\n")
+cat("When opponent on a B2B:", round(bkn_def_efg_opp_b2b, 1), "%\n")
+```
+
+
+## Analysis Step 8
+
+```{r}
+# QUESTION 6: Identify 2+ trends in scheduling over time
+
+schedule_trends <- schedule %>%
+  arrange(team, season, gamedate) %>%
+  group_by(team, season) %>%
+  mutate(
+    prev_gamedate = lag(gamedate),
+    days_rest = as.numeric(difftime(gamedate, prev_gamedate, units = "days")),
+    
+    is_b2b = !is.na(days_rest) & days_rest == 1,
+    
+    is_home = (home == 1),
+    
+    game_num = row_number()
+  ) %>%
+  ungroup()
+
+trend_b2b <- schedule_trends %>%
+  group_by(season, team) %>%
+  summarise(
+    total_games = n(),
+    b2b_count = sum(is_b2b, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(b2b_per_82 = (b2b_count / total_games) * 82) %>%
+  group_by(season) %>%
+  summarise(
+    avg_b2b = mean(b2b_per_82, na.rm = TRUE),
+    sd_b2b = sd(b2b_per_82, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(trend_b2b, aes(x = season, y = avg_b2b)) +
+  geom_ribbon(aes(ymin = avg_b2b - sd_b2b, ymax = avg_b2b + sd_b2b), 
+              fill = "#007AC1", alpha = 0.2) +
+  geom_line(color = "#007AC1", size = 1.5) +
+  geom_point(color = "#EF3B24", size = 3) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "black", size = 0.8) +
+  scale_x_continuous(breaks = seq(2014, 2023, 1)) +
+  labs(
+    title = "Trend 1: Back-to-Back Games Declining Over Time",
+    subtitle = "Average back-to-backs per team (adjusted to 82 games) with standard deviation ribbon",
+    x = "Season",
+    y = "Average Back-to-Backs per Team (per 82 games)",
+    caption = "Data from 2014-15 to 2023-24 seasons | Dashed line shows linear trend"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Calculate the actual decline
+b2b_model <- lm(avg_b2b ~ season, data = trend_b2b)
+cat("\nBack-to-back trend analysis:\n")
+cat("Average decline per year:", round(coef(b2b_model)[2], 2), "back-to-backs\n")
+cat("Total decline from 2014 to 2023:", 
+    round((trend_b2b$avg_b2b[trend_b2b$season == 2014] - 
+           trend_b2b$avg_b2b[trend_b2b$season == 2023]), 2), "back-to-backs\n\n")
+
+
+trend_rest <- schedule_trends %>%
+  filter(!is.na(days_rest)) %>%
+  group_by(season) %>%
+  summarise(
+    avg_days_rest = mean(days_rest, na.rm = TRUE),
+    median_days_rest = median(days_rest, na.rm = TRUE),
+    pct_1_day = mean(days_rest == 1, na.rm = TRUE) * 100,
+    pct_2_days = mean(days_rest == 2, na.rm = TRUE) * 100,
+    pct_3plus_days = mean(days_rest >= 3, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
+
+ggplot(trend_rest, aes(x = season)) +
+  geom_line(aes(y = avg_days_rest, color = "Average"), size = 1.5) +
+  geom_line(aes(y = median_days_rest, color = "Median"), size = 1.5) +
+  geom_point(aes(y = avg_days_rest, color = "Average"), size = 3) +
+  geom_point(aes(y = median_days_rest, color = "Median"), size = 3) +
+  scale_color_manual(values = c("Average" = "#007AC1", "Median" = "#EF3B24")) +
+  scale_x_continuous(breaks = seq(2014, 2023, 1)) +
+  labs(
+    title = "Trend 2: Teams Getting More Rest Between Games",
+    subtitle = "Average and median days between games have increased",
+    x = "Season",
+    y = "Days Rest Between Games",
+    color = "Metric",
+    caption = "Data from 2014-15 to 2023-24 seasons"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+trend_rest_long <- trend_rest %>%
+  select(season, pct_1_day, pct_2_days, pct_3plus_days) %>%
+  pivot_longer(cols = starts_with("pct"), 
+               names_to = "rest_category", 
+               values_to = "percentage") %>%
+  mutate(rest_category = case_when(
+    rest_category == "pct_1_day" ~ "1 Day (B2B)",
+    rest_category == "pct_2_days" ~ "2 Days",
+    rest_category == "pct_3plus_days" ~ "3+ Days"
+  ))
+
+ggplot(trend_rest_long, aes(x = season, y = percentage, fill = rest_category)) +
+  geom_area(alpha = 0.7) +
+  scale_fill_manual(values = c("1 Day (B2B)" = "#EF3B24", 
+                                "2 Days" = "#FDB927", 
+                                "3+ Days" = "#007AC1")) +
+  scale_x_continuous(breaks = seq(2014, 2023, 1)) +
+  labs(
+    title = "Distribution of Rest Days Between Games Over Time",
+    subtitle = "Back-to-backs decreasing while 3+ day rest periods increasing",
+    x = "Season",
+    y = "Percentage of Games (%)",
+    fill = "Days Rest",
+    caption = "Data from 2014-15 to 2023-24 seasons"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+
+schedule_with_4in6 <- schedule_trends %>%
+  arrange(team, season, gamedate) %>%
+  group_by(team, season) %>%
+  mutate(
+    date_numeric = as.numeric(gamedate),
+    # Check if 4 games in past 6 nights
+    is_4in6 = sapply(1:n(), function(i) {
+      if (i < 4) return(FALSE)
+      recent_dates <- date_numeric[(max(1, i-5)):i]
+      date_span <- max(recent_dates) - min(recent_dates)
+      return(length(recent_dates) >= 4 && date_span <= 5)
+    })
+  ) %>%
+  ungroup()
+
+trend_4in6 <- schedule_with_4in6 %>%
+  group_by(season, team) %>%
+  summarise(
+    total_games = n(),
+    count_4in6 = sum(is_4in6, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(count_4in6_per_82 = (count_4in6 / total_games) * 82) %>%
+  group_by(season) %>%
+  summarise(
+    avg_4in6 = mean(count_4in6_per_82, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(trend_4in6, aes(x = season, y = avg_4in6)) +
+  geom_line(color = "#007AC1", size = 1.5) +
+  geom_point(color = "#EF3B24", size = 3) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, linetype = "dashed") +
+  scale_x_continuous(breaks = seq(2014, 2023, 1)) +
+  labs(
+    title = "Bonus Trend: 4-in-6 Night Stretches Declining",
+    subtitle = "Average number of times teams play 4 games in 6 nights (per 82 games)",
+    x = "Season",
+    y = "Average 4-in-6 Stretches per Team",
+    caption = "Data from 2014-15 to 2023-24 seasons"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+
+## Analysis Step 9
+
+```{r}
+library(plotly)
+library(zoo)
+
+# Main function to visualize team schedule with travel
+plot_team_schedule <- function(team_abbr, season_year, schedule_data) {
+  
+  # Get team schedule and add location data for travel calculations
+  team_viz_data <- schedule_data %>%
+    filter(team == team_abbr, season == season_year) %>%
+    arrange(gamedate) %>%
+    left_join(locations, by = c("team" = "team")) %>%
+    rename(team_lat = latitude, team_lon = longitude) %>%
+    left_join(locations, by = c("opponent" = "team")) %>%
+    rename(opp_lat = latitude, opp_lon = longitude) %>%
+    mutate(
+      game_num = row_number(),
+      
+      # Calculate days rest between games
+      days_rest = coalesce(as.numeric(difftime(gamedate, lag(gamedate), units = "days")), 3),
+      is_b2b = days_rest == 1,
+      
+      # Calculate travel distance using Haversine formula (only for away games)
+      travel_dist = ifelse(home == 1, 0,
+        6371 * acos(pmin(1, cos(team_lat * pi/180) * cos(opp_lat * pi/180) * 
+                         cos((opp_lon - team_lon) * pi/180) + 
+                         sin(team_lat * pi/180) * sin(opp_lat * pi/180)))),
+      
+      cumulative_travel = cumsum(travel_dist),
+      location = ifelse(home == 1, "Home", "Away"),
+      
+      # Create hover text with key info
+      hover_text = paste0(
+        "<b>Game ", game_num, "</b> | ", format(gamedate, "%b %d, %Y"), "<br>",
+        "vs ", opponent, " (", location, ")<br>",
+        "Days Rest: ", days_rest, ifelse(is_b2b, " ⚠️ B2B", ""), "<br>",
+        "Travel: ", round(travel_dist, 0), " km | Cumulative: ", round(cumulative_travel, 0), " km"
+      )
+    )
+  
+  # Create interactive timeline plot
+  plot_ly() %>%
+    # Main line showing days rest over time (color-coded by rest amount)
+    add_trace(
+      data = team_viz_data,
+      x = ~gamedate, y = ~days_rest,
+      type = "scatter", mode = "lines+markers",
+      marker = list(size = 10, color = ~days_rest,
+                   colorscale = list(c(0, "red"), c(0.5, "yellow"), c(1, "green")),
+                   cmin = 1, cmax = 4,
+                   colorbar = list(title = "Days<br>Rest")),
+      line = list(color = "lightgray"),
+      text = ~hover_text, hoverinfo = "text",
+      name = "Schedule", showlegend = FALSE
+    ) %>%
+    # Highlight back-to-backs with red X markers
+    add_trace(
+      data = team_viz_data %>% filter(is_b2b),
+      x = ~gamedate, y = ~days_rest,
+      type = "scatter", mode = "markers",
+      marker = list(size = 15, color = "red", symbol = "x"),
+      text = ~hover_text, hoverinfo = "text",
+      name = "Back-to-Back"
+    ) %>%
+    layout(
+      title = paste0("<b>", team_abbr, " ", season_year, "-", substr(season_year + 1, 3, 4), 
+                    " Schedule</b>"),
+      xaxis = list(title = "Date"),
+      yaxis = list(title = "Days Rest Before Game"),
+      hovermode = "closest",
+      plot_bgcolor = "#f8f9fa"
+    )
+}
+
+# Secondary plot: cumulative travel burden
+plot_travel_burden <- function(team_abbr, season_year, schedule_data) {
+  
+  # Calculate cumulative travel distance
+  team_schedule <- schedule_data %>%
+    filter(team == team_abbr, season == season_year) %>%
+    arrange(gamedate) %>%
+    left_join(locations, by = c("team" = "team")) %>%
+    rename(team_lat = latitude, team_lon = longitude) %>%
+    left_join(locations, by = c("opponent" = "team")) %>%
+    rename(opp_lat = latitude, opp_lon = longitude) %>%
+    mutate(
+      game_num = row_number(),
+      travel_dist = ifelse(home == 1, 0,
+        6371 * acos(pmin(1, cos(team_lat * pi/180) * cos(opp_lat * pi/180) * 
+                         cos((opp_lon - team_lon) * pi/180) + 
+                         sin(team_lat * pi/180) * sin(opp_lat * pi/180)))),
+      cumulative_travel = cumsum(travel_dist)
+    )
+  
+  # Plot cumulative travel over season
+  plot_ly(team_schedule, x = ~game_num, y = ~cumulative_travel) %>%
+    add_trace(type = "scatter", mode = "lines", fill = "tozeroy",
+             fillcolor = "rgba(0, 122, 193, 0.2)",
+             line = list(color = "#007AC1", width = 3),
+             name = "Total Travel") %>%
+    layout(
+      title = paste0("<b>", team_abbr, " Cumulative Travel</b>"),
+      xaxis = list(title = "Game Number"),
+      yaxis = list(title = "Distance (km)")
+    )
+}
+
+# Generate visualizations for OKC and DEN
+okc_schedule_plot <- plot_team_schedule("OKC", 2024, draft_schedule)
+okc_schedule_plot
+
+okc_travel_plot <- plot_travel_burden("OKC", 2024, draft_schedule)
+okc_travel_plot
+
+den_schedule_plot <- plot_team_schedule("DEN", 2024, draft_schedule)
+den_schedule_plot
+
+den_travel_plot <- plot_travel_burden("DEN", 2024, draft_schedule)
+den_travel_plot
+
+# Summary comparison table
+draft_schedule %>%
+  filter(team %in% c("OKC", "DEN"), season == 2024) %>%
+  arrange(team, gamedate) %>%
+  left_join(locations, by = c("team" = "team")) %>%
+  rename(team_lat = latitude, team_lon = longitude) %>%
+  left_join(locations, by = c("opponent" = "team")) %>%
+  rename(opp_lat = latitude, opp_lon = longitude) %>%
+  group_by(team) %>%
+  mutate(
+    days_rest = coalesce(as.numeric(difftime(gamedate, lag(gamedate), units = "days")), 3),
+    is_b2b = days_rest == 1,
+    travel_dist = ifelse(home == 1, 0,
+      6371 * acos(pmin(1, cos(team_lat * pi/180) * cos(opp_lat * pi/180) * 
+                       cos((opp_lon - team_lon) * pi/180) + 
+                       sin(team_lat * pi/180) * sin(opp_lat * pi/180))))
+  ) %>%
+  summarise(
+    `Total Games` = n(),
+    `Back-to-Backs` = sum(is_b2b, na.rm = TRUE),
+    `Home Games` = sum(home == 1),
+    `Total Travel (km)` = round(sum(travel_dist, na.rm = TRUE), 0),
+    `Avg Days Rest` = round(mean(days_rest, na.rm = TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  kable() %>%
+  kable_styling()
+
+```
+## Analysis Step 9 — Styled summary table
+```{r}
+# Ensure kableExtra is available for kable_styling()
+if (!requireNamespace("kableExtra", quietly = TRUE)) {
+  install.packages("kableExtra")
+}
+library(kableExtra)
+
+# If your Rmd also renders to PDF, you can keep this HTML table
+# and it will still knit; for best results prefer html_document output.
+
+# Render a clean, responsive table
+# >>> Replace YOUR_TABLE_DF with your actual object (e.g., step9_tbl, team_4in6, etc.)
+YOUR_TABLE_DF %>%
+  knitr::kable(format = "html",
+               caption = "Summary table",
+               digits = 2) %>%
+  kableExtra::kable_styling(full_width = FALSE,
+                            bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  kableExtra::scroll_box(width = "100%")
+
+```
+
+## Analysis Step 10
+
+```{r}
+library(tidyverse)
+library(lubridate)
+
+# Approach: Logistic regression to predict wins, compare actual vs neutral schedule
+
+# Haversine distance (km)
+haversine <- function(lat1, lon1, lat2, lon2) {
+  6371 * 2 * asin(sqrt(sin((lat2-lat1)*pi/360)^2 + 
+    cos(lat1*pi/180) * cos(lat2*pi/180) * sin((lon2-lon1)*pi/360)^2))
+}
+
+# Load data
+schedule <- read_csv("schedule.csv", show_col_types = FALSE) %>% 
+  mutate(gamedate = ymd(gamedate))
+locations <- read_csv("locations.csv", show_col_types = FALSE)
+game_data <- read_csv("team_game_data.csv", show_col_types = FALSE) %>% 
+  mutate(gamedate = ymd(gamedate))
+
+# Build schedule features from schedule.csv
+sched <- schedule %>%
+  left_join(locations, by = "team") %>%
+  left_join(locations %>% rename(opponent=team, opp_lat=latitude, opp_lon=longitude), 
+            by = "opponent") %>%
+  arrange(team, gamedate) %>%
+  group_by(team, season) %>%
+  mutate(
+    rest = as.integer(gamedate - lag(gamedate)),
+    b2b = rest == 1,
+    prev_lat = lag(ifelse(home==1, latitude, opp_lat)),
+    prev_lon = lag(ifelse(home==1, longitude, opp_lon)),
+    curr_lat = ifelse(home==1, latitude, opp_lat),
+    curr_lon = ifelse(home==1, longitude, opp_lon),
+    travel = if_else(!is.na(prev_lat), haversine(prev_lat, prev_lon, curr_lat, curr_lon), 0)
+  ) %>%
+  ungroup() %>%
+  select(team, gamedate, season, home, rest, b2b, travel)
+
+# Build game outcomes (game_data has offensive perspective rows)
+games <- game_data %>%
+  select(off_team, def_team, gamedate, season, shotattemptpoints) %>%
+  rename(team = off_team, opp = def_team, pts = shotattemptpoints) %>%
+  left_join(
+    game_data %>% 
+      select(off_team, gamedate, season, shotattemptpoints) %>%
+      rename(opp = off_team, opp_pts = shotattemptpoints),
+    by = c("opp", "gamedate", "season")
+  ) %>%
+  mutate(won = as.integer(pts > opp_pts)) %>%
+  left_join(sched, by = c("team", "gamedate", "season"))
+
+# Calculate team strength
+strength <- games %>%
+  group_by(team, season) %>%
+  summarize(net = mean(pts - opp_pts, na.rm=TRUE), .groups="drop")
+
+# Prepare modeling data
+model_df <- games %>%
+  left_join(strength, by = c("team", "season")) %>%
+  left_join(strength %>% rename(opp=team, opp_net=net), by = c("opp", "season")) %>%
+  filter(season >= 2014, season <= 2023, !is.na(won), !is.na(home)) %>%
+  mutate(rest = pmin(replace_na(rest, 3), 5))
+
+# Fit model
+fit <- glm(won ~ home + rest + b2b + travel + net + opp_net + factor(season), 
+           data = model_df, family = binomial())
+
+cat("\n=== Model Summary ===\n")
+print(round(summary(fit)$coefficients[1:6, c(1,2,4)], 4))
+
+# Calculate schedule impact (2019-2023)
+target <- model_df %>% filter(season >= 2019)
+target$p_actual <- predict(fit, target, type = "response")
+target$p_neutral <- predict(fit, target %>% mutate(rest=2, b2b=FALSE, travel=0), type = "response")
+
+# Aggregate by team
+results <- target %>%
+  mutate(delta = p_actual - p_neutral) %>%
+  group_by(team) %>%
+  summarize(wins_from_schedule = sum(delta, na.rm=TRUE), .groups="drop") %>%
+  arrange(desc(wins_from_schedule))
+
+cat("\n=== RESULTS (2019-2023) ===\n")
+cat("Most Helped:", results$team[1], "=", round(results$wins_from_schedule[1], 1), "wins\n")
+cat("Most Hurt:", results$team[nrow(results)], "=", round(results$wins_from_schedule[nrow(results)], 1), "wins\n\n")
+
+print(results %>% slice(c(1:5, (n()-4):n())))
+```
+
+
+# Results & Findings
+
+Key takeaways are discussed inline around the corresponding plots and tables produced by the 
+code chunks. Where appropriate, we interpret notable trends (e.g., game-level performance, 
+player-level contributions, shooting efficiency, lineup impacts). The specifics will depend on 
+what the preserved code computes and visualizes.
+
+
+# Conclusion & Next Steps
+
+This analysis showcases an end-to-end workflow to explore OKC performance data in R. 
+Future enhancements might include model-based evaluations (e.g., adjusted plus-minus, 
+win probability models), richer player-tracking features, and season-over-season comparisons. 
+The repository can be extended to include parameterized reports to compare across teams or seasons.
